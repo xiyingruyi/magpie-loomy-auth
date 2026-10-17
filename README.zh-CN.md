@@ -150,7 +150,7 @@ Loomy 还有 8 个一次性任务（合计 10000 积分）。它们是**福利�
 ## 开发
 
 ```sh
-bun test                    # 74 个测试，全部打在本地 fake 上游
+bun test                    # 76 个测试，全部打在本地 fake 上游
 bun scripts/live-check.mjs  # 对真实服务的只读检查
 LOOMY_SESSION=… bun scripts/live-check.mjs   # 再加模型、积分与一次真实对话
 ```
@@ -158,6 +158,10 @@ LOOMY_SESSION=… bun scripts/live-check.mjs   # 再加模型、积分与一次�
 fake 上游（`test/fake.mjs`）会**重新计算账号域的 HMAC 签名**再比对，并检查
 对话请求的双鉴权头与 charset —— 签名代码一旦写错，测试就会失败，而不是让真实
 服务去发现。
+
+自审中修掉的两个缺陷也各有一条回归测试：首条 SSE 记录之后正好切在多字节字符
+中间时，尾部字节会被丢掉（`peekFirst` 改成按字节切分）；首条就是错误时，上游
+响应体没有被取消（连接要等 GC 才还回去）。
 
 入口只负责装配钩子；逻辑都在 `lib/` 下是普通函数，测试经由 `_internal` 取用 ——
 因为 magpie 和 OpenCode 都会把每一个导出的函数当成一个独立插件。

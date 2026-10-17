@@ -168,7 +168,7 @@ here, each with a regression test:
 ## Development
 
 ```sh
-bun test                    # 74 tests, all against a local fake upstream
+bun test                    # 76 tests, all against a local fake upstream
 bun scripts/live-check.mjs  # read-only checks against the real service
 LOOMY_SESSION=… bun scripts/live-check.mjs   # + models, usage, one chat
 ```
@@ -177,6 +177,11 @@ The fake upstream (`test/fake.mjs`) **re-computes the account domain's HMAC
 signature** for every request and checks both auth headers and the charset on
 chat, so a regression in the signing code fails the suite rather than the
 live service.
+
+Two defects found by review have regression tests of their own: a multi-byte
+character split right after the first SSE record used to lose its trailing
+bytes (`peekFirst` now slices bytes, not a decoded string), and a first-frame
+error used to abandon the upstream body instead of cancelling it.
 
 The entry point only assembles hooks. The logic lives in `lib/` as plain
 functions, reached through `_internal` in tests, because magpie and OpenCode

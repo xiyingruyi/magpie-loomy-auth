@@ -74,3 +74,18 @@ test("peekFirst with no stream", async () => {
   expect(raw).toBe("")
   expect(rest).toBeNull()
 })
+
+// 回归：首条记录的边界之后正好跟着一个被切断的多字节字符。早先的实现把整段
+// 解码进一个字符串再切，切完就丢掉 decoder，续字节单独解码成 U+FFFD。
+test("peekFirst does not lose bytes when a character is split after the first record", async () => {
+  const enc = new TextEncoder()
+  const first = 'data: {"a":1}\n\n'
+  const full = enc.encode(`${first}data: 你好世界`)
+  const cut = enc.encode(first).length + 2 // 切在「你」的中间
+  const body = streamOf(full.subarray(0, cut), full.subarray(cut))
+  const head = await peekFirst(body)
+  expect(head.record).toEqual({ event: "", data: '{"a":1}' })
+  const out = []
+  for await (const rec of sseRecords(withPrefix(head.raw, head.rest))) out.push(rec.data)
+  expect(out).toEqual(['{"a":1}', "你好世界"])
+})

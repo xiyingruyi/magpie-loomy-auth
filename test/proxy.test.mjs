@@ -246,3 +246,24 @@ test("a real 401 from upstream is passed on with the lapse mark", async () => {
   expect(res.status).toBe(401)
   expect(res.headers.get("X-Magpie-Sign-In")).toBe("expired")
 })
+
+// 回归：首条就是错误时，上游响应体已经被 peekFirst 锁住；不取消它，连接要
+// 等 GC 才还回去。取消要通过 peekFirst 交回的 rest 流（原流已被锁）。
+test("a first-frame error cancels the upstream body instead of abandoning it", async () => {
+  let cancelled = false
+  const body = new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ code: "42900", desc: "请求过于频繁" })}\n\n`))
+    },
+    cancel() {
+      cancelled = true
+    },
+  })
+  const f = makeFetch(base({
+    call: async () => new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+  }))
+  const res = await f("https://gateway/v1/chat/completions", { body: '{"model":"m","stream":true,"messages":[]}' })
+  expect(res.status).toBe(429)
+  await new Promise((r) => setTimeout(r, 0))
+  expect(cancelled).toBe(true)
+})
