@@ -31,3 +31,12 @@ test("package.json points at the repo it lives in", () => {
     expect(pkg.files).toContain(f)
   }
 })
+
+// magpie 的两个列表读的不是同一个字段：provider 卡片读 magpie.icon（内联
+// data URI，立刻可用），插件列表读 InstalledIcon 的 https URL（后台下载、
+// 下一次刷新才显示）。两份都必须是同一张图。
+test("the icon's URL copy is reachable and is the same picture", () => {
+  const url = String(pkg.magpie?.iconUrl ?? "")
+  expect(url).toMatch(/^https:\/\/raw\.githubusercontent\.com\/xiyingruyi\/magpie-loomy-auth\/main\//)
+  expect(pkg.magpie.icon).toContain(Buffer.from(readFileSync(new URL("../icon.svg", import.meta.url))).toString("base64").slice(0, 40))
+})

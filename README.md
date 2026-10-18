@@ -22,8 +22,10 @@ the iFlytek piece — with the failure modes found while shipping
 
 ## Install
 
-The provider's icon is the file `icon.svg` in this repo, carried inline in
-`package.json` (`magpie.icon`) so it works without a network fetch.
+The provider's icon is `icon.svg`. `package.json` carries it twice, because
+magpie's two lists read different fields: `magpie.icon` as an inline data URI
+for the provider card (stored at once, no network), and `magpie.iconUrl` as a
+raw GitHub URL for the plugin list, which fetches pictures in the background.
 
 Not published to npm; magpie installs it straight from GitHub:
 
