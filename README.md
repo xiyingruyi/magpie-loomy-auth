@@ -205,7 +205,7 @@ body instead of cancelling it.
 ## Development
 
 ```sh
-bun test                    # 83 tests, all against a local fake upstream
+bun test                    # 85 tests, all against a local fake upstream
 bun scripts/live-check.mjs  # read-only checks against the real service
 LOOMY_SESSION=… bun scripts/live-check.mjs   # + models, usage, one chat
 ```

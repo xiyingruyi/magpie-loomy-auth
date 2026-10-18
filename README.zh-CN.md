@@ -180,7 +180,7 @@ Loomy 还有 8 个一次性任务（合计 10000 积分）。它们是**福利�
 ## 开发
 
 ```sh
-bun test                    # 83 个测试，全部打在本地 fake 上游
+bun test                    # 85 个测试，全部打在本地 fake 上游
 bun scripts/live-check.mjs  # 对真实服务的只读检查
 LOOMY_SESSION=… bun scripts/live-check.mjs   # 再加模型、积分与一次真实对话
 ```
