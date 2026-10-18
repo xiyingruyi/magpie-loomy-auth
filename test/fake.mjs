@@ -33,8 +33,10 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
     onboardingDone: {},
     onboardingQueries: 0,
     onboardingCompletes: 0,
-    // 上游的每日赠送余额
+    // 上游的每日赠送余额与额度
     dailyBalance: 5000,
+    dailyQuota: 5000,
+    firstLoginToday: false,
     permanentBalance: 1200,
     // 断言用：最近一次请求的头
     lastChatHeaders: null,
@@ -56,6 +58,8 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
       state.onboardingQueries = 0
       state.onboardingCompletes = 0
       state.dailyBalance = 5000
+      state.dailyQuota = 5000
+      state.firstLoginToday = false
       state.lastChatHeaders = null
       state.chatMode = "stream"
       state.modelsNoCode = false
@@ -126,10 +130,12 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
         return json(200, {
           ...(state.modelsNoCode ? {} : { code: OK, desc: "ok" }),
           data: [
-            { id: "spark-x", name: "Spark X2.5 (x0.1)", capabilities: { reasoning: true, function_calling: true, vision: false }, context_window: 128000, max_tokens: 8192 },
-            { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash 0731 (x3.0)", capabilities: { reasoning: true, function_calling: false, vision: true } },
-            { id: "glm-5.3-flash", name: "GLM 5.3 Flash（x0.8）", capabilities: { reasoning: false, function_calling: false, vision: true } },
-            { id: "plain", name: "No Suffix At All", capabilities: {} },
+            { id: "spark-x", name: "Spark X2.5 (x0.1)", type: "chat", context_length: 128000, max_output_tokens: 8192, reasoning_efforts: ["none", "low", "medium", "high", "xhigh"], capabilities: { reasoning: true, function_calling: true, vision: false, output_modalities: ["text"] } },
+            { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash 0731 (x3.0)", type: "chat", context_length: 1048576, reasoning_efforts: ["none", "low", "medium", "high", "xhigh"], capabilities: { reasoning: true, function_calling: false, vision: true, output_modalities: ["text"] } },
+            { id: "glm-5.3-flash", name: "GLM 5.3 Flash（x0.8）", type: "chat", context_length: 1048576, max_output_tokens: 131072, reasoning_efforts: ["none", "low", "medium", "high"], capabilities: { reasoning: false, function_calling: false, vision: true, output_modalities: ["text"] } },
+            { id: "plain", name: "No Suffix At All", type: "chat", capabilities: {} },
+            // 生图模型：type=image、output_modalities 是 image，不该被当成文本模型
+            { id: "hy-image", name: "Hy image 3.5 preview", type: "image", context_length: 100000, capabilities: { reasoning: false, vision: true, function_calling: false, input_modalities: ["text", "image"], output_modalities: ["image"] } },
           ],
         })
       }
@@ -181,18 +187,34 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
       }
       if (url.pathname === "/api/v1/points/first-login") {
         state.firstLoginCalls++
-        return json(200, { code: OK, desc: "ok", data: { dailyBalance: state.dailyBalance } })
+        // 真实上游：同一天再调回 alreadyProcessed=true；额度只在 dailyQuota 里给
+        const already = state.firstLoginToday
+        state.firstLoginToday = true
+        return json(200, {
+          code: OK,
+          desc: "成功",
+          data: {
+            alreadyProcessed: already,
+            currentBalance: state.permanentBalance + state.dailyBalance,
+            permanentBalance: state.permanentBalance,
+            dailyBalance: already ? state.dailyBalance : state.dailyQuota,
+            dailyQuota: state.dailyQuota,
+            dailyConsumed: state.dailyQuota - state.dailyBalance,
+            dailyCycleDate: "2026-10-18",
+          },
+        })
       }
       if (url.pathname === "/api/v2/points/records") {
         state.recordsReads++
+        // 真实上游只给这三样：余额、每日剩余、两者之和。**没有**额度字段 ——
+        // 参照实现读的 dailyLimitPoints / dailyRemainingPoints 并不存在。
         return json(200, {
           code: OK,
           desc: "ok",
           data: {
             balance: state.permanentBalance,
             dailyBalance: state.dailyBalance,
-            dailyLimitPoints: 5000,
-            dailyRemainingPoints: state.dailyBalance,
+            availableBalance: state.permanentBalance + state.dailyBalance,
             list: [],
             total: 0,
           },

@@ -105,14 +105,20 @@ Loomy 对**本该是错误**的情况回 **HTTP 200 + 业务码**，登录失效
 ## 模型
 
 登录后清单来自账号自己（`GET /api/v1/models`）：OpenAI 条目，外加
-`capabilities { reasoning, function_calling, vision }`、上下文窗口，以及
-**有时有、有时没有**的 `max_tokens`。展示名尾部带倍率（`Spark X2.5 (x0.1)`），
-成为 magpie 的 `rate`。
+`capabilities { reasoning, vision, function_calling, streaming, input_modalities,
+output_modalities }`、`context_length`、`max_output_tokens`，以及
+`reasoning_efforts`（`none`/`low`/`medium`/`high`/`xhigh`，成为 magpie 的
+variants）。展示名尾部带倍率（`Spark X2.5 (x0.1)`），成为 magpie 的 `rate`。
 
-**输出上限绝不自己编。** 上游给了 `max_tokens` 就用它；没给就是 `0` —— magpie
-把它读成「上游没说」，转而从 models.dev 取值。这一点很关键：magpie 把模型的
-`limit.output` 当作**硬上限**下发到每个请求，自己编一个「保守」的默认值，就等于
-造出一个真实的天花板（之前 384,000 token 的回复被夹到 32,000，就是这么来的）。
+**输出上限绝不自己编。** 上游给了 `max_output_tokens` 就用它；没给就是 `0` ——
+magpie 把它读成「上游没说」，转而从 models.dev 取值。这一点很关键：magpie 把
+模型的 `limit.output` 当作**硬上限**下发到每个请求，自己编一个「保守」的默认值，
+就等于造出一个真实的天花板（之前 384,000 token 的回复被夹到 32,000，就是这么
+来的）。
+
+生图条目（`type: "image"`、输出只有 image）不进清单：它们唯一的门是
+`/api/v1/images/generations`，而 magpie 不替插件账号转发那个接口 —— 列出来就是
+提供一个选了必然失败的模型。
 
 登录之前用一份 3 个模型的兜底表，让 provider 在登录前就可见。清单按账号缓存
 几分钟：magpie 在**每个**转发的请求前都会问一次插件的模型清单，每次都去问上游
@@ -122,8 +128,15 @@ Loomy 对**本该是错误**的情况回 **HTTP 200 + 业务码**，登录失效
 
 `magpie quota` 显示两个窗口，数据来自 `/api/v2/points/records`：
 
-- **每日赠送积分** —— 今天的每日赠送，北京零点重置；
+- **每日赠送积分** —— 今日已用 / 每日额度（`327 / 5,000 credits · 7% used`），
+  北京零点重置；
 - **永久积分** —— 永久钱包，不过期（`aside`）。
+
+每日额度不在这个接口里（上游只回还剩多少），来自签到接口的 `dailyQuota`，
+签到成功时记到账号上；没签到过的账号用出厂值 5000。
+
+这个接口实测很慢（2.4s–20s+，偶尔回「系统内部错误」），所以读取给 45s 预算，
+失败时退回上一次成功的结果并注明，而不是把额度卡片整块变成错误。
 
 干净读取时**不报 `signIn`**：这是 magpie 清除瞬时 401 留下的失效标记的方式。
 Loomy 无法续期，这里报 `kept` 会让那个标记永远留在账号上。
@@ -179,10 +192,32 @@ Loomy 还有 8 个一次性任务（合计 10000 积分）。它们是**福利�
    （包括每一条失败路径）都交回带 callback 的流程，有一条测试把六种输入全走
    一遍。
 
+## 真实上游教给我们的东西
+
+拿两个真实账号跑下来，发现了一批参照实现猜错的地方。每一条现在都有测试钉住：
+
+- **模型清单的字段名。** 真实清单用的是 `context_length` / `max_output_tokens`，
+  参照实现读的是 `context_window` / `max_tokens`。只认旧名字会让每个模型的输出
+  上限都变成 `0`。
+- **积分接口根本不带额度字段。** `GET /api/v2/points/records` 只回 `balance`、
+  `dailyBalance`、`availableBalance`，没有参照实现读的 `dailyLimitPoints`。
+  拿余额当上限会显示成「0 / 4,673 · 0% used」。真实的每日额度（5000）只出现在
+  `POST /api/v1/points/first-login` 的 `dailyQuota` 里，所以签到会把它记到账号
+  上，用量页从那里读。
+- **`auto` 是会调工具的。** 它的目录条目连 `capabilities` 都没有。把「没说」
+  当成「不支持」，会让自动模型用不了工具 —— 而它路由到的模型是支持的。
+- **生图模型不是聊天模型。** 三个（`Hy-Image-3.5-preview`、
+  `doubao-seedream-5-lite`、`qwen-image-3.0-pro`）在对话端点一律回 404
+  「该模型暂未开放」，唯一的门是 `/api/v1/images/generations`，而 magpie 不替
+  插件账号转发这个接口。所以它们不进清单，而不是列出来必然失败。
+- **积分接口很慢。** 实测 2.4s–20s+，偶尔回业务码 `900000`（「系统内部错误」）。
+  用量读取给 45s 预算，读失败时退回上一次成功的结果并注明，而不是把卡片整块
+  变成错误。
+
 ## 开发
 
 ```sh
-bun test                    # 85 个测试，全部打在本地 fake 上游
+bun test                    # 106 个测试，全部打在本地 fake 上游
 bun scripts/live-check.mjs  # 对真实服务的只读检查
 LOOMY_SESSION=… bun scripts/live-check.mjs   # 再加模型、积分与一次真实对话
 ```

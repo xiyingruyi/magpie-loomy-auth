@@ -151,7 +151,7 @@ describe("chat", () => {
     expect(fake.state.lastChatHeaders.contentType).toContain("charset=utf-8")
   })
 
-  test("reasoning effort folds to low/medium/high", async () => {
+  test("reasoning effort folds into the five levels the upstream knows", async () => {
     const loader = await plugin.auth.loader(getAuth)
     const send = (effort) => loader.fetch("http://x/v1/chat/completions", {
       method: "POST",
@@ -160,9 +160,12 @@ describe("chat", () => {
     await send("minimal")
     await send("max")
     await send("none")
+    await send("xhigh")
     expect(fake.state.chatCalls[0].body.reasoning_effort).toBe("low")
-    expect(fake.state.chatCalls[1].body.reasoning_effort).toBe("high")
-    expect(fake.state.chatCalls[2].body.reasoning_effort).toBeUndefined()
+    expect(fake.state.chatCalls[1].body.reasoning_effort).toBe("xhigh")
+    expect(fake.state.chatCalls[2].body.reasoning_effort).toBe("none")
+    // 上游一等档位 xhigh 原样透传，不能折成 high
+    expect(fake.state.chatCalls[3].body.reasoning_effort).toBe("xhigh")
   })
 
   test("non-streaming callers get one completion back", async () => {
@@ -233,11 +236,12 @@ describe("checkin", () => {
     // 结算标记写回账号
     expect(saved.onboardingSettled).toBe(true)
 
-    // 第二次不再扫描，也不再上报
+    // 第二次不再扫描，也不再上报；上游说今天已经处理过 → done
     const queries = fake.state.onboardingQueries
     const completes = fake.state.onboardingCompletes
     const second = await plugin.auth.checkin(getAuth)
-    expect(second.outcome).toBe("claimed")
+    expect(second.outcome).toBe("done")
+    expect(second.message).toContain("今日已领过")
     expect(second.credit).toBeUndefined()
     expect(fake.state.onboardingQueries).toBe(queries)
     expect(fake.state.onboardingCompletes).toBe(completes)
@@ -289,16 +293,22 @@ describe("models", () => {
   test("the live catalogue, rates split out of the names", async () => {
     const p = { models: {} }
     const list = await plugin.provider.models(p, { auth: saved })
+    // 生图模型被剔除：插件账号没有可用的生图入口（magpie 不替插件转发
+    // images API，chat 端点对它们一律 404）
     expect(Object.keys(list)).toEqual(["spark-x", "deepseek-v4-flash", "glm-5.3-flash", "plain"])
     expect(list["spark-x"].name).toBe("Spark X2.5")
     expect(list["spark-x"].rate).toBe("x0.1")
     expect(list["spark-x"].limit).toEqual({ context: 128000, output: 8192 })
+    // 真实上游字段名是 max_output_tokens，没给就 0，不能猜
     expect(list["deepseek-v4-flash"].rate).toBe("x3.0")
     expect(list["deepseek-v4-flash"].limit.output).toBe(0)
     expect(list["glm-5.3-flash"].rate).toBe("x0.8")
+    expect(list["glm-5.3-flash"].limit.output).toBe(131072)
     expect(list["glm-5.3-flash"].capabilities.input.image).toBe(true)
     expect(list["plain"].rate).toBeUndefined()
     expect(list["plain"].name).toBe("No Suffix At All")
+    // 生图模型不在聊天清单里（见上）
+    expect(list["hy-image"]).toBeUndefined()
   })
 
   // magpie 每个请求前都会问一次 provider.models（fetchAs → info），所以钩子里
@@ -388,6 +398,89 @@ describe("usage", () => {
     expect(daily.amount).toBe(3800)
     expect(daily.limit).toBe(5000)
     expect(daily.used).toBe(76)
+  })
+
+  // 回归：真实上游的 points/records **不返回额度**（只有余额、每日剩余）。
+  // 曾经把「余额」当上限，用量页显示成 "0 / 4673 · 0% used" —— 一个编造的
+  // 额度。现在上限来自签到学到的 dailyQuota（没有就用出厂值 5000）。
+  test("the daily window never takes the balance for its limit", async () => {
+    fake.state.dailyBalance = 4673
+    const usage = await plugin.auth.usage(getAuth)
+    const daily = usage.windows.find((w) => w.name === "每日赠送积分")
+    expect(daily.limit).toBe(5000)
+    expect(daily.amount).toBe(327)
+    expect(daily.used).toBe(7)
+    // 余额比额度大（上游改过发放量）也不能出现负数或超过 100%
+    fake.state.dailyBalance = 6000
+    const over = (await plugin.auth.usage(getAuth)).windows.find((w) => w.name === "每日赠送积分")
+    expect(over.amount).toBe(0)
+    expect(over.used).toBe(0)
+  })
+
+  // 签到接口是唯一回 dailyQuota 的地方：学到后写回账号，用量页用它。
+  test("check-in learns the daily quota and the usage page uses it", async () => {
+    fake.state.dailyBalance = 4200
+    fake.state.dailyQuota = 6000
+    const result = await plugin.auth.checkin(getAuth)
+    expect(result.outcome).toBe("claimed")
+    expect(saved.dailyQuota).toBe(6000)
+    // getAuth 每次都重新读 saved，所以用量页自然拿到新值
+    const daily = (await plugin.auth.usage(getAuth)).windows.find((w) => w.name === "每日赠送积分")
+    expect(daily.limit).toBe(6000)
+    expect(daily.amount).toBe(1800)
+  })
+
+  test("a second check-in the same day says so, and does not re-scan", async () => {
+    const first = await plugin.auth.checkin(getAuth)
+    expect(first.outcome).toBe("claimed")
+    const second = await plugin.auth.checkin(getAuth)
+    expect(second.outcome).toBe("done")
+    expect(second.message).toContain("今日已领过")
+  })
+
+  // 回归（对抗审查发现）：client.auth.set 是**替换**不是合并。同一次签到里
+  // 先写 dailyQuota、再写 onboardingSettled 时，后一次用的是开头读到的旧快照，
+  // 会把前一次刚写的字段抹掉。两处都必须把字段补进快照。
+  test("one check-in writes both fields, neither clobbers the other", async () => {
+    saved = { type: "oauth", access: fake.state.session, refresh: "", expires: 0, accountId: "138****8000", source: "sms" }
+    fake.state.dailyQuota = 6000
+    fake.state.dailyBalance = 6000
+    plugin = await LoomyAuthPlugin({ client, magpie: { option: () => true } })
+    const r = await plugin.auth.checkin(getAuth)
+    expect(r.outcome).toBe("claimed")
+    // 最后一次写入之后，两个字段都还在
+    expect(saved.dailyQuota).toBe(6000)
+    expect(saved.onboardingSettled).toBe(true)
+  })
+
+  // 实测这个上游的积分接口在 2.4s–16s 之间抖，偶发超时。读失败时不该让整块
+  // 用量变成错误 —— 把上一次读成功的数交回去，并说明它是上一次的。
+  test("a failed read falls back to the last good reading", async () => {
+    const good = await plugin.auth.usage(getAuth)
+    const daily = good.windows.find((w) => w.name === "每日赠送积分")
+    expect(daily.limit).toBe(5000)
+
+    const realFetch = globalThis.fetch
+    globalThis.fetch = () => Promise.reject(new Error("The operation timed out."))
+    try {
+      const kept = await plugin.auth.usage(getAuth)
+      expect(kept.error).toContain("上一次读取")
+      // 数还在
+      const stillThere = kept.windows.find((w) => w.name === "每日赠送积分")
+      expect(stillThere.limit).toBe(5000)
+      expect(stillThere.amount).toBe(daily.amount)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  // 登录失效不能沿用旧数：那会把一个需要重新登录的账号显示成一切正常。
+  test("a lapsed session never reuses the last good reading", async () => {
+    await plugin.auth.usage(getAuth) // 先有一次成功
+    saved = { type: "oauth", access: "gone", refresh: "", expires: 0 }
+    const u = await plugin.auth.usage(getAuth)
+    expect(u.signIn).toBe("expired")
+    expect(u.windows).toEqual([])
   })
 
   test("a dead session reports expired and never throws", async () => {

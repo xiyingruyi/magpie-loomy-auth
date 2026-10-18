@@ -114,16 +114,23 @@ fetch leaves magpie with a failure that has no context.
 ## Models
 
 Signed in, the list is the account's own (`GET /api/v1/models`): OpenAI-shaped
-entries plus `capabilities { reasoning, function_calling, vision }`, a context
-window, and — sometimes — a `max_tokens`. Display names carry the credit rate
-(`Spark X2.5 (x0.1)`), which becomes magpie's `rate`.
+entries plus `capabilities { reasoning, vision, function_calling, streaming,
+input_modalities, output_modalities }`, `context_length`, `max_output_tokens`,
+and `reasoning_efforts` (`none`/`low`/`medium`/`high`/`xhigh`, exposed as magpie
+variants). Display names carry the credit rate (`Spark X2.5 (x0.1)`), which
+becomes magpie's `rate`.
 
-**The output limit is never invented.** An entry that says `max_tokens` gets
-that number; one that doesn't gets `0`, which magpie reads as "not said" and
-fills from models.dev. That matters because magpie enforces a model's
-`limit.output` as a **hard cap** on every request: a "safe" made-up default
-becomes a real ceiling (this is exactly how 384,000-token replies were once
-clamped to 32,000).
+**The output limit is never invented.** An entry that says
+`max_output_tokens` gets that number; one that doesn't gets `0`, which magpie
+reads as "not said" and fills from models.dev. That matters because magpie
+enforces a model's `limit.output` as a **hard cap** on every request: a "safe"
+made-up default becomes a real ceiling (this is exactly how 384,000-token
+replies were once clamped to 32,000).
+
+Image-generation entries (`type: "image"`, output `image` only) are left out:
+their only door is `/api/v1/images/generations`, which magpie does not route
+for plugin accounts, so listing them would mean offering a model that always
+fails.
 
 Before signing in, a three-model fallback keeps the provider visible. The
 catalogue is cached per account for a few minutes: magpie asks the plugin for
@@ -134,8 +141,18 @@ vendor each time would add an upstream round trip to every chat.
 
 `magpie quota` shows two windows, from `/api/v2/points/records`:
 
-- **每日赠送积分** — today's daily grant, resetting at Beijing midnight;
+- **每日赠送积分** — used today against the daily quota
+  (`327 / 5,000 credits · 7% used`), resetting at Beijing midnight;
 - **永久积分** — the permanent wallet, which never expires (`aside`).
+
+The daily quota itself is not in that response (the vendor only says how much
+is left). It comes from the check-in endpoint's `dailyQuota` and is recorded on
+the account when check-in runs; an account that never checked in falls back to
+a factory 5000.
+
+That endpoint measured 2.4s–20s+ with occasional "系统内部错误" answers, so reads
+get a 45s budget and fall back to the last good reading, marked as such, rather
+than turning the card into an error.
 
 A clean read reports **no `signIn`**: that is how magpie clears a lapse mark
 left by a transient 401. Loomy cannot renew a session, so claiming "kept" here
@@ -204,10 +221,38 @@ the first SSE record used to lose its trailing bytes (`peekFirst` now slices
 bytes, not a decoded string), and a first-frame error abandoned the upstream
 body instead of cancelling it.
 
+### What the live service taught us
+
+Running the plugin against two real accounts turned up fields and behaviours
+the reference implementation had guessed wrong. Each one is now pinned by a
+test:
+
+- **The catalogue's field names.** The live list uses `context_length` /
+  `max_output_tokens`; the reference reads `context_window` / `max_tokens`.
+  Reading only the old names made every model's output limit `0`.
+- **The usage endpoint has no quota field.** `GET /api/v2/points/records`
+  returns `balance`, `dailyBalance` and `availableBalance` — not the
+  `dailyLimitPoints` the reference reads. Using the balance as the limit
+  printed `0 / 4,673 · 0% used`. The real daily quota (`5000`) only appears in
+  `POST /api/v1/points/first-login`'s `dailyQuota`, so check-in records it on
+  the account and the usage page reads it from there.
+- **`auto` does call tools.** Its catalogue entry has no `capabilities` at
+  all. Treating "said nothing" as "not supported" left the automatic model
+  unable to use tools, though it routes to one that can.
+- **Image models are not chat models.** All three (`Hy-Image-3.5-preview`,
+  `doubao-seedream-5-lite`, `qwen-image-3.0-pro`) answer the chat endpoint with
+  404 "该模型暂未开放"; their only door is `/api/v1/images/generations`, which
+  magpie does not route for plugin accounts. They are left out of the list
+  rather than offered and failing.
+- **The points endpoint is slow.** Measured between 2.4s and 20s+, sometimes
+  answering with business code `900000` ("系统内部错误"). Usage reads get a
+  45s budget and fall back to the last good reading — marked as such — instead
+  of turning the card into an error.
+
 ## Development
 
 ```sh
-bun test                    # 85 tests, all against a local fake upstream
+bun test                    # 106 tests, all against a local fake upstream
 bun scripts/live-check.mjs  # read-only checks against the real service
 LOOMY_SESSION=… bun scripts/live-check.mjs   # + models, usage, one chat
 ```

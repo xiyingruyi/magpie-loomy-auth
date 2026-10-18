@@ -10,7 +10,7 @@ import { modelsFromCatalog, configModelsFrom } from "./lib/models.mjs"
 import { makeFetch } from "./lib/proxy.mjs"
 import { makeCheckin } from "./lib/checkin.mjs"
 import { usageOf } from "./lib/usage.mjs"
-import { ONBOARDING_TASKS, ONBOARDING_TOTAL, settledOf, SETTLED_FIELD } from "./lib/onboarding.mjs"
+import { ONBOARDING_TASKS, ONBOARDING_TOTAL, settledOf, SETTLED_FIELD, DAILY_QUOTA_FIELD, dailyQuotaOf } from "./lib/onboarding.mjs"
 
 // 每个账号的模型能力表：模型清单拉下来时填，请求管线按 model id 查。
 // 键是 `${accountKey}:${modelId}`，accountKey 取 auth 的 accountId。
@@ -90,7 +90,14 @@ export async function LoomyAuthPlugin({ client, magpie } = {}) {
     await client.auth.set({ path: { id: ID }, body: { ...auth, [SETTLED_FIELD]: true } })
   }
 
-  const checkin = makeCheckin({ sessionOf, settledOf, settle, onboardingOn: () => onboardingOn({ magpie }) })
+  // 记住每日赠送额度（签到接口唯一会给的两个字段之一）。只是缓存：既没有
+  // client 也照常签到。
+  const rememberQuota = async (auth, quota) => {
+    if (!client?.auth?.set || !auth) return
+    await client.auth.set({ path: { id: ID }, body: { ...auth, [DAILY_QUOTA_FIELD]: quota } })
+  }
+
+  const checkin = makeCheckin({ sessionOf, settledOf, settle, rememberQuota, onboardingOn: () => onboardingOn({ magpie }) })
 
   return {
     config(config) {
@@ -267,6 +274,7 @@ export async function LoomyAuthPlugin({ client, magpie } = {}) {
         return usageOf(getAuth, {
           sessionOf,
           userOf: accountLabel,
+          quotaOf: dailyQuotaOf,
           call: fetch,
         })
       },
@@ -320,4 +328,5 @@ export const _internal = {
   liveCatalog,
   failedFlow,
   catalogs,
+  dailyQuotaOf,
 }

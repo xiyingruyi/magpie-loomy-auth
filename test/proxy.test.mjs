@@ -42,6 +42,10 @@ test("statusFor maps the upstream's business codes by meaning", () => {
   // 没见过的 code 但文案在说额度用完 / 限流
   expect(statusFor("99999", "额度已用完，请升级套餐")).toBe(402)
   expect(statusFor("99999", "请求过于频繁，请稍后再试")).toBe(429)
+  // 上游自己的故障（实测积分接口抖动时回 900000 / 系统内部错误）：是 502，
+  // 不是「请求写错了」的 400
+  expect(statusFor("900000", "系统内部错误")).toBe(502)
+  expect(statusFor("99999", "internal server error")).toBe(502)
   // 其余：请求本身有问题
   expect(statusFor("12345", "whatever")).toBe(400)
   expect(statusFor("", "")).toBe(400)
@@ -222,7 +226,7 @@ test("the body reaches the upstream folded and image-adapted", async () => {
       messages: [{ role: "user", content: [{ type: "text", text: "看图" }, { type: "image_url", image_url: { url: "data:image/png;base64,QQ" } }] }],
     }),
   })
-  expect(seen.reasoning_effort).toBe("high")
+  expect(seen.reasoning_effort).toBe("xhigh")
   expect(seen.messages[0].content).toHaveLength(1)
   expect(seen.messages[0].content[0].text).toContain("<image_base64>")
 })
@@ -236,6 +240,22 @@ test("a profile lookup that throws does not sink the request", async () => {
   const res = await f("https://gateway/v1/chat/completions", { body: '{"model":"m","messages":[]}' })
   expect(res.status).toBe(200)
   expect(seen.model).toBe("m")
+})
+
+// 上游表达「登录失效」永远是 HTTP 200 + 业务码（实测）。所以真回了 HTTP 403
+// 是**权限拒绝**（模型不可见 / 套餐不含），不能折成 401 把一个健康账号标成
+// lapsed —— 那还会让 magpie 去换账号而不是换模型。
+test("a real HTTP 401 lapses the account, a 403 does not", async () => {
+  const f401 = makeFetch(base({ call: async () => new Response('{"code":"100002","desc":"登录已失效，请重新登录"}', { status: 401 }) }))
+  const r401 = await f401("https://gateway/v1/chat/completions", { body: '{"model":"m","messages":[]}' })
+  expect(r401.status).toBe(401)
+  expect(r401.headers.get("X-Magpie-Sign-In")).toBe("expired")
+
+  const f403 = makeFetch(base({ call: async () => new Response(JSON.stringify({ error: { message: "不支持的模型", code: 40300 } }), { status: 403 }) }))
+  const r403 = await f403("https://gateway/v1/chat/completions", { body: '{"model":"m","messages":[]}' })
+  expect(r403.status).toBe(403)
+  expect(r403.headers.get("X-Magpie-Sign-In")).toBeNull()
+  expect((await r403.json()).error.message).toContain("不支持的模型")
 })
 
 test("a real 401 from upstream is passed on with the lapse mark", async () => {

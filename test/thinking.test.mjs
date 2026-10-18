@@ -1,23 +1,26 @@
 import { test, expect } from "bun:test"
 import { foldReasoning, prefersTagFormat, rewriteImagesToTags, adaptBody } from "../lib/thinking.mjs"
 
-test("reasoning efforts fold into the three levels the upstream knows", () => {
+test("reasoning efforts fold into the five levels the upstream knows", () => {
   const body = (effort) => ({ model: "m", reasoning_effort: effort })
   const wire = (effort) => {
     const b = body(effort)
     foldReasoning(b)
     return b.reasoning_effort
   }
-  expect(wire("minimal")).toBe("low")
+  // 上游承认的五档原样透传
+  expect(wire("none")).toBe("none")
   expect(wire("low")).toBe("low")
   expect(wire("medium")).toBe("medium")
   expect(wire("high")).toBe("high")
-  expect(wire("xhigh")).toBe("high")
-  expect(wire("max")).toBe("high")
-  expect(wire("ultra")).toBe("high")
-  // 关不掉的档位直接删字段，而不是发一个上游不认识的值
-  expect(wire("none")).toBeUndefined()
+  expect(wire("xhigh")).toBe("xhigh")
+  // agent 的别名折到相邻档
+  expect(wire("minimal")).toBe("low")
+  expect(wire("max")).toBe("xhigh")
+  expect(wire("ultra")).toBe("xhigh")
+  // 上游不认的值删字段
   expect(wire("off")).toBeUndefined()
+  expect(wire("disabled")).toBeUndefined()
   expect(wire("bogus")).toBeUndefined()
 })
 
@@ -27,7 +30,7 @@ test("the nested reasoning.effort shape folds too", () => {
   expect(b.reasoning.effort).toBe("low")
   const c = { reasoning: { effort: "none" } }
   foldReasoning(c)
-  expect("effort" in c.reasoning).toBe(false)
+  expect(c.reasoning.effort).toBe("none")
   // 别的字段不受影响
   const d = { reasoning: { effort: "minimal", summary: "auto" } }
   foldReasoning(d)
@@ -39,7 +42,7 @@ test("nothing else in the body is touched", () => {
   foldReasoning(b)
   expect(b.temperature).toBe(0.2)
   expect(b.messages).toEqual([{ role: "user", content: "hi" }])
-  expect(b.reasoning_effort).toBe("high")
+  expect(b.reasoning_effort).toBe("xhigh")
 })
 
 test("deepseek models read images as markers", () => {
@@ -103,7 +106,7 @@ test("adaptBody drops the effort for a model that does not reason", () => {
 test("adaptBody keeps and folds the effort for a reasoning model", () => {
   const b = { model: "spark-x", reasoning_effort: "max", messages: [] }
   adaptBody(b, { reasoning: true })
-  expect(b.reasoning_effort).toBe("high")
+  expect(b.reasoning_effort).toBe("xhigh")
 })
 
 test("adaptBody uses the model's image preference when known", () => {
