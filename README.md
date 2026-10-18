@@ -139,7 +139,8 @@ vendor each time would add an upstream round trip to every chat.
 
 ## Points and usage
 
-`magpie quota` shows two windows, from `/api/v2/points/records`:
+`magpie quota` shows two windows, from `/api/v1/points/records` (v2 serves the
+same data):
 
 - **每日赠送积分** — used today against the daily quota
   (`327 / 5,000 credits · 7% used`), resetting at Beijing midnight;
@@ -150,9 +151,17 @@ is left). It comes from the check-in endpoint's `dailyQuota` and is recorded on
 the account when check-in runs; an account that never checked in falls back to
 a factory 5000.
 
-That endpoint measured 2.4s–20s+ with occasional "系统内部错误" answers, so reads
-get a 45s budget and fall back to the last good reading, marked as such, rather
-than turning the card into an error.
+That endpoint measured 0.3s–28s with occasional "系统内部错误" answers (code
+`900000` over HTTP 200). More to the point, **magpie gives a plugin's usage hook
+only 20 seconds** (`context.WithTimeout` in `plugin_usage.go`); past that the
+host gives up and the card says "As of …, couldn't be read just now" no matter
+how many points the account has. The plugin therefore reads inside that window,
+in two attempts: 8s on v2, then 8s on v1. Only when both fail does it fall back
+to the last good reading, marked as such.
+
+A signed-out answer is only believed when **both** entries give it: the vendor
+occasionally returns `100002` for a single read of an otherwise fine session,
+and marking the account on one of those costs the user a fresh SMS sign-in.
 
 A clean read reports **no `signIn`**: that is how magpie clears a lapse mark
 left by a transient 401. Loomy cannot renew a session, so claiming "kept" here
@@ -230,7 +239,7 @@ test:
 - **The catalogue's field names.** The live list uses `context_length` /
   `max_output_tokens`; the reference reads `context_window` / `max_tokens`.
   Reading only the old names made every model's output limit `0`.
-- **The usage endpoint has no quota field.** `GET /api/v2/points/records`
+- **The usage endpoint has no quota field.** `GET /api/v1/points/records`
   returns `balance`, `dailyBalance` and `availableBalance` — not the
   `dailyLimitPoints` the reference reads. Using the balance as the limit
   printed `0 / 4,673 · 0% used`. The real daily quota (`5000`) only appears in
@@ -244,15 +253,19 @@ test:
   404 "该模型暂未开放"; their only door is `/api/v1/images/generations`, which
   magpie does not route for plugin accounts. They are left out of the list
   rather than offered and failing.
-- **The points endpoint is slow.** Measured between 2.4s and 20s+, sometimes
-  answering with business code `900000` ("系统内部错误"). Usage reads get a
-  45s budget and fall back to the last good reading — marked as such — instead
-  of turning the card into an error.
+- **The points endpoint is slow, and magpie's window is shorter.** Measured
+  between 0.3s and 28s, sometimes answering with business code `900000`
+  ("系统内部错误"). But magpie gives a plugin's usage hook only 20 seconds
+  (`context.WithTimeout` in `plugin_usage.go`) — the 45s budget the plugin used
+  to take ran past it, so the host gave up first and the card read "couldn't be
+  read just now" while the account was fully funded. Reads now fit inside the
+  window (8s on v2, then 8s on v1) before falling back to the last good
+  reading, marked as such.
 
 ## Development
 
 ```sh
-bun test                    # 106 tests, all against a local fake upstream
+bun test                    # 111 tests, all against a local fake upstream
 bun scripts/live-check.mjs  # read-only checks against the real service
 LOOMY_SESSION=… bun scripts/live-check.mjs   # + models, usage, one chat
 ```

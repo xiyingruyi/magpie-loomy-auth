@@ -29,6 +29,7 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
     chatCalls: [],
     firstLoginCalls: 0,
     recordsReads: 0,
+    recordsVersions: [], // 每次积分读命中的入口，按顺序
     modelsReads: 0,
     onboardingDone: {},
     onboardingQueries: 0,
@@ -47,12 +48,17 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
     // 额外的有效 session（默认只有一个账号）
     extraSessions: [],
     chatError: { code: "100002", desc: "登录已失效，请重新登录" },
+    // 积分接口的抖动：v2 会偶发 900000 / 超时（实测），这里能把某次读切成失败。
+    // 值是一次性的队列，读一次弹一个；空队列 = 永远成功。
+    recordsFail: [], // "v2-error" | "v1-error" | "all-error"
+    recordsPayload: null, // 覆盖整份 payload（形状不对时用）
     reset() {
       state.smsSent = null
       state.logins = 0
       state.chatCalls = []
       state.firstLoginCalls = 0
       state.recordsReads = 0
+      state.recordsVersions = []
       state.modelsReads = 0
       state.onboardingDone = {}
       state.onboardingQueries = 0
@@ -64,6 +70,8 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
       state.chatMode = "stream"
       state.modelsNoCode = false
       state.extraSessions = []
+      state.recordsFail = []
+      state.recordsPayload = null
     },
   }
   const AK = process.env.LOOMY_XFYUN_ACCESS_KEY_ID || "2thryby66wxi53sk"
@@ -204,8 +212,23 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
           },
         })
       }
-      if (url.pathname === "/api/v2/points/records") {
+      // 两个入口是同一份数据：v1 与 v2 都认（实测两者字段完全一致）
+      if (url.pathname === "/api/v2/points/records" || url.pathname === "/api/v1/points/records") {
+        const version = url.pathname.startsWith("/api/v2/") ? "v2" : "v1"
         state.recordsReads++
+        state.recordsVersions.push(version)
+        // 抖动：队列里的一条消费一次
+        const fail = state.recordsFail.shift()
+        if (fail === "all-error" || fail === `${version}-error`) {
+          // 真实上游的失败形状：HTTP 200 + 业务码 900000「系统内部错误」
+          return json(200, { code: "900000", desc: "系统内部错误", data: {} })
+        }
+        // 只让某一个入口说「登录失效」（真实上游偶尔也会这么回一次）：
+        // 用来看插件会不会把一次假失效当成真失效、或者白重试一次
+        if (fail === `${version}-auth`) {
+          return json(200, { code: "100002", desc: "登录已失效，请重新登录", data: {} })
+        }
+        if (state.recordsPayload) return json(200, state.recordsPayload)
         // 真实上游只给这三样：余额、每日剩余、两者之和。**没有**额度字段 ——
         // 参照实现读的 dailyLimitPoints / dailyRemainingPoints 并不存在。
         return json(200, {

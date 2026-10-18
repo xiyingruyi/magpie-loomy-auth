@@ -474,6 +474,57 @@ describe("usage", () => {
     }
   })
 
+  // 回归（2026-10-19 真机事故）：magpie 只给 20 秒
+  // （plugin_usage.go 的 context.WithTimeout），而插件原来给 45 秒 —— 上游一慢
+  // 宿主就先放弃，卡片上打「暂时无法获取最新额度」，尽管积分充足。现在预算
+  // 压在 20 秒以内，v2 慢了就对冲一个 v1。
+  test("a flaky v2 is hedged by v1", async () => {
+    fake.state.recordsFail = ["v2-error"]
+    const usage = await plugin.auth.usage(getAuth)
+    expect(usage.error).toBeUndefined()
+    expect(usage.windows.find((w) => w.name === "每日赠送积分").limit).toBe(5000)
+    // v2 失败后 v1 也对冲出去了
+    expect(fake.state.recordsVersions.sort()).toEqual(["v1", "v2"])
+  })
+
+  // 两个入口都失败才是真失败：这时退回上一次读数，并同时说明两边的错误，
+  // 而不是只报最后一个（那会掩盖第一个的真实原因）。
+  test("when both entries fail, the error names both", async () => {
+    fake.state.recordsFail = ["v2-error", "v1-error"]
+    const usage = await plugin.auth.usage(getAuth)
+    expect(usage.error).toContain("系统内部错误")
+    expect(usage.error).toContain("v2")
+    expect(fake.state.recordsVersions.sort()).toEqual(["v1", "v2"])
+  })
+
+  // 登录失效要两边都说才算数：实测上游偶尔对一次只读请求回 100002（60 次里
+  // 见过 1 次），session 本身是好的。拿一次这种回答去标记账号，用户就得重新
+  // 短信登录一次才消掉。
+  test("one entry saying signed-out is not enough to mark the account", async () => {
+    fake.state.recordsFail = ["v2-auth"]
+    const usage = await plugin.auth.usage(getAuth)
+    expect(usage.signIn).toBeUndefined()
+    expect(usage.error).toBeUndefined()
+    expect(usage.windows.find((w) => w.name === "每日赠送积分").limit).toBe(5000)
+    expect(fake.state.recordsVersions.sort()).toEqual(["v1", "v2"])
+  })
+
+  // 两边都说失效才是真失效，并且不重试第三次。
+  test("both entries saying signed-out marks the account expired", async () => {
+    fake.state.recordsFail = ["v2-auth", "v1-auth"]
+    const usage = await plugin.auth.usage(getAuth)
+    expect(usage.signIn).toBe("expired")
+    expect(usage.windows).toEqual([])
+    expect(fake.state.recordsVersions.sort()).toEqual(["v1", "v2"])
+  })
+
+  // 预算：magpie 的钩子期限是 20 秒，最坏情况要留在里面（对冲等待 + 一次超时）。
+  test("one read never outlasts magpie's 20-second window", async () => {
+    const source = await Bun.file(new URL("../lib/usage.mjs", import.meta.url)).text()
+    const num = (name) => Number(source.match(new RegExp(`const ${name} = ([\\d_]+)`))[1].replace(/_/g, ""))
+    expect(num("HEDGE_AFTER") + num("ATTEMPT_TIMEOUT")).toBeLessThanOrEqual(16_000)
+  })
+
   // 登录失效不能沿用旧数：那会把一个需要重新登录的账号显示成一切正常。
   test("a lapsed session never reuses the last good reading", async () => {
     await plugin.auth.usage(getAuth) // 先有一次成功

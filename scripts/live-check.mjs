@@ -157,7 +157,8 @@ if (session) {
     check(drawers.length === 0, "生图模型没有混进聊天清单", drawers.join(", ") || "无")
   }
 
-  // 5b. 用量（上游慢时可能 20s+，插件自己的预算是 45s）
+  // 5b. 用量（上游慢时可能 20s+；magpie 的钩子期限只有 20s，所以插件在里面
+  // 分两段读并换入口重试）
   const u = await onceMore("usage", async () => {
     const r = await plugin.auth.usage(getAuth)
     // usage 从不抛：把 error 折成异常交给重试。回退到上次读数的结果也是
