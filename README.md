@@ -22,6 +22,9 @@ the iFlytek piece — with the failure modes found while shipping
 
 ## Install
 
+The provider's icon is the file `icon.svg` in this repo, carried inline in
+`package.json` (`magpie.icon`) so it works without a network fetch.
+
 Not published to npm; magpie installs it straight from GitHub:
 
 ```sh

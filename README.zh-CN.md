@@ -19,6 +19,9 @@ Loomy 部分的**从头重写**（只要讯飞这一块），并且把之前做
 
 ## 安装
 
+provider 的头像就是仓库里的 `icon.svg`，以内联 data URI 写在 `package.json`
+的 `magpie.icon` 里 —— 不联网也能显示。
+
 没有发布到 npm；magpie 可以直接从 GitHub 装：
 
 ```sh
