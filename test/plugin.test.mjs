@@ -578,3 +578,13 @@ describe("config", () => {
     expect(cfg.provider.loomy.models["spark-x"]).toBeTruthy()
   })
 })
+
+// 🔴 magpie 给 auth.usage / auth.checkin 钩子的期限是 20 秒，从钩子被调起
+// 那一刻开始算。插件自己的单次请求预算必须**留出余量**，否则上游一慢就变成
+// 「宿主先放弃、插件后报超时」—— 实测 25 轮签到里出现过 1 次 20003ms 失败。
+test("a single upstream request never outlasts magpie's 20-second hook window", async () => {
+  const { REQUEST_TIMEOUT } = await import("../lib/constants.mjs")
+  expect(REQUEST_TIMEOUT).toBeLessThan(20_000)
+  // 留足余量：至少 4 秒给宿主的调度、序列化和回写
+  expect(20_000 - REQUEST_TIMEOUT).toBeGreaterThanOrEqual(4_000)
+})

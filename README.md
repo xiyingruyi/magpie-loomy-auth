@@ -265,7 +265,7 @@ test:
 ## Development
 
 ```sh
-bun test                    # 111 tests, all against a local fake upstream
+bun test                    # 112 tests, all against a local fake upstream
 bun scripts/live-check.mjs  # read-only checks against the real service
 LOOMY_SESSION=… bun scripts/live-check.mjs   # + models, usage, one chat
 ```
