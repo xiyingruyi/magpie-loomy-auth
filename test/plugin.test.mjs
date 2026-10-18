@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test"
-import { LoomyAuthPlugin } from "../index.mjs"
+import { LoomyAuthPlugin, _internal } from "../index.mjs"
 import { fakeLoomy } from "./fake.mjs"
 
 // 全部打到本地 fake 上游：账号域会重新校验 HMAC 签名，网关会检查双凭据头
@@ -26,6 +26,8 @@ afterAll(() => {
 
 beforeEach(async () => {
   fake.state.reset()
+  // 模型目录缓存是模块级的，测试之间必须清掉，否则前一个用例的清单会漏过来
+  _internal.catalogs.clear()
   saved = { type: "oauth", access: fake.state.session, refresh: "", expires: 0, accountId: "138****8000", source: "sms" }
   client = { auth: { set: async ({ body }) => setAuth(body) } }
   plugin = await LoomyAuthPlugin({ client })
@@ -54,37 +56,80 @@ describe("sign-in", () => {
     expect(result.userId).toBe("261014155255771375")
   })
 
+  // magpie 的 authorize 只取 {url, instructions, method} —— type/error 会被丢掉，
+  // 然后它照样去调 callback。所以「失败」也必须是一个带 callback 的流程，不然
+  // 报出来的是 `s.a.callback is not a function`（实测过）。
   test("SMS: an invalid phone is refused before anything is sent", async () => {
     const method = plugin.auth.methods.find((m) => m.label.includes("SMS"))
     const bad = await method.authorize({ phone: "12345" })
-    expect(bad.type).toBe("failed")
+    expect(typeof bad.callback).toBe("function")
+    expect(bad.method).not.toBe("code")
+    expect((await bad.callback()).error).toContain("11 位")
     expect(fake.state.smsSent).toBeNull()
   })
 
-  test("SMS: a vendor refusing the send is reported, not thrown", async () => {
+  test("SMS: a vendor refusing the send is reported through the flow", async () => {
     const method = plugin.auth.methods.find((m) => m.label.includes("SMS"))
     // fake 只认一个手机号，换一个就会被上游拒（HTTP 400 + 业务码）
     const bad = await method.authorize({ phone: "13900139000" })
-    expect(bad.type).toBe("failed")
-    expect(bad.error).toContain("phone not found")
+    expect(typeof bad.callback).toBe("function")
+    const r = await bad.callback()
+    expect(r.type).toBe("failed")
+    expect(r.error).toContain("phone not found")
   })
 
-  test("manual paste verifies the session before accepting it", async () => {
+  // 收尾必须走 callback：magpie（CLI 的 plugin.Finish 与窗口的 SignIn 驱动）
+  // 对 method !== "code" 的流程直接调一次 callback，authorize 的返回值里只有
+  // {url, instructions, method} 会留下。
+  // 这条断言挡住的是整类 bug：magpie 对 oauth 流程**无条件**调用 callback
+  // （CLI 的 plugin.Finish、窗口的 SignIn 驱动都一样），而 authorize 的返回值
+  // 里只有 {url, instructions, method} 留得下来。任何一条路只要改成「从
+  // authorize 里 return 结果」，用户看到的就是 `s.a.callback is not a function`。
+  test("every sign-in path hands magpie a flow with a callback", async () => {
+    const sms = plugin.auth.methods.find((m) => m.label.includes("SMS"))
+    const paste = plugin.auth.methods.find((m) => m.label.includes("Paste"))
+    const cases = [
+      [sms, { phone: "13800138000" }], // 正常：发码 + 等验证码
+      [sms, { phone: "12345" }], // 非法手机号
+      [sms, { phone: "13900139000" }], // 上游拒绝发码
+      [paste, { session: "  " }], // 空 session
+      [paste, { session: "nope" }], // 坏 session
+      [paste, { session: fake.state.session }], // 好 session
+    ]
+    for (const [method, inputs] of cases) {
+      const flow = await method.authorize(inputs)
+      expect(typeof flow.callback).toBe("function")
+      expect(typeof flow.url).toBe("string")
+    }
+  })
+
+  test("manual paste finishes through its callback", async () => {
     const method = plugin.auth.methods.find((m) => m.label.includes("Paste"))
-    const good = await method.authorize({ session: fake.state.session })
+    const flow = await method.authorize({ session: fake.state.session })
+    expect(flow.method).toBe("auto")
+    expect(typeof flow.callback).toBe("function")
+    const good = await flow.callback()
     expect(good.type).toBe("success")
     expect(good.access).toBe(fake.state.session)
     // 校验过：上游确实被问了一次清单
     expect(fake.state.modelsReads).toBeGreaterThan(0)
-    // 错的 session 直接拒绝，不让 magpie 存一个「看似登录、实际每次 401」的账号
-    const bad = await method.authorize({ session: "nope" })
+  })
+
+  test("manual paste rejects a session the vendor does not know", async () => {
+    const method = plugin.auth.methods.find((m) => m.label.includes("Paste"))
+    const flow = await method.authorize({ session: "nope" })
+    const bad = await flow.callback()
     expect(bad.type).toBe("failed")
     expect(bad.error).toContain("失效")
   })
 
-  test("manual paste refuses an empty session", async () => {
+  test("manual paste refuses an empty session, from the callback", async () => {
     const method = plugin.auth.methods.find((m) => m.label.includes("Paste"))
-    expect((await method.authorize({ session: "  " })).type).toBe("failed")
+    const flow = await method.authorize({ session: "  " })
+    expect(typeof flow.callback).toBe("function")
+    const bad = await flow.callback()
+    expect(bad.type).toBe("failed")
+    expect(bad.error).toContain("必填")
   })
 })
 
@@ -256,6 +301,43 @@ describe("models", () => {
     expect(list["plain"].name).toBe("No Suffix At All")
   })
 
+  // magpie 每个请求前都会问一次 provider.models（fetchAs → info），所以钩子里
+  // 直接打上游等于每聊一句多一次往返。短缓存是行为的一部分，得钉住。
+  test("the catalogue is cached between calls, and per session", async () => {
+    await plugin.provider.models({ models: {} }, { auth: saved })
+    expect(fake.state.modelsReads).toBe(1)
+    await plugin.provider.models({ models: {} }, { auth: saved })
+    expect(fake.state.modelsReads).toBe(1)
+    // 另一个账号不复用：不同账号能用的模型可能不同
+    fake.state.extraSessions = ["sess-2"]
+    await plugin.provider.models({ models: {} }, { auth: { ...saved, access: "sess-2" } })
+    expect(fake.state.modelsReads).toBe(2)
+  })
+
+  test("a catalogue that carries no business code is still the live one", async () => {
+    // 真实上游的模型清单接口不返回 code；严格判码会把整个实时清单换成兜底表
+    fake.state.modelsNoCode = true
+    const p = { models: { "spark-x": { name: "Spark X2.5" } } }
+    const list = await plugin.provider.models(p, { auth: saved })
+    expect(Object.keys(list).length).toBeGreaterThan(1)
+    expect(list["glm-5.3-flash"]).toBeDefined()
+  })
+
+  test("a failed read is not cached, so the next call tries again", async () => {
+    fake.state.modelsNoCode = false
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response(JSON.stringify({ code: "100009", desc: "boom" }), { status: 200 })
+    try {
+      const p = { models: { keep: { name: "Keep" } } }
+      expect(await plugin.provider.models(p, { auth: saved })).toEqual({ keep: { name: "Keep" } })
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    // 上游恢复后照常拿到实时清单
+    const list = await plugin.provider.models({ models: {} }, { auth: saved })
+    expect(list["spark-x"]).toBeDefined()
+  })
+
   test("signed out keeps the list it was given", async () => {
     const p = { models: { keep: { name: "Keep" } } }
     const list = await plugin.provider.models(p, { auth: {} })
@@ -284,7 +366,10 @@ describe("usage", () => {
     // 干净读取不报 signIn：没有续期接口，报 kept 会让 lapsed 标记永远清不掉
     expect(usage.signIn).toBeUndefined()
     const daily = usage.windows.find((w) => w.name === "每日赠送积分")
-    expect(daily.amount).toBe(5000)
+    // magpie 把 amount 当「用掉多少」拼成 "N / limit credits · M% used"：
+    // 满额钱包就是 0 / 5000 · 0%
+    expect(daily.amount).toBe(0)
+    expect(daily.used).toBe(0)
     expect(daily.limit).toBe(5000)
     expect(daily.resetsAt).toBeGreaterThan(Date.now())
     expect(daily.resetsAt - Date.now()).toBeLessThanOrEqual(86400e3)
@@ -292,6 +377,17 @@ describe("usage", () => {
     expect(permanent.display).toBe("1200 credits")
     expect(usage.balance).toBe("1200 credits")
     expect(usage.user).toBe("138****8000")
+  })
+
+  // magpie 把 amount 当「用掉多少」，卡片拼成 "N / limit credits · M% used"；
+  // 报余额会显示成 "5,000 / 5,000 · 0% used" 这种自相矛盾的组合。
+  test("a partly spent day reports what was used, not the balance", async () => {
+    fake.state.dailyBalance = 1200 // 5000 的日额度里还剩 1200
+    const usage = await plugin.auth.usage(getAuth)
+    const daily = usage.windows.find((w) => w.name === "每日赠送积分")
+    expect(daily.amount).toBe(3800)
+    expect(daily.limit).toBe(5000)
+    expect(daily.used).toBe(76)
   })
 
   test("a dead session reports expired and never throws", async () => {

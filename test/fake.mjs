@@ -39,7 +39,11 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
     // 断言用：最近一次请求的头
     lastChatHeaders: null,
     // 让测试能改上游行为
-    chatMode: "stream", // stream | json | json-error | sse-error | 401
+    chatMode: "stream", // stream | json | json-error | sse-error | 401 | empty-sse | empty-json
+    // 模型清单接口在真实上游**不返回业务码**，这里能切成那种形态
+    modelsNoCode: false,
+    // 额外的有效 session（默认只有一个账号）
+    extraSessions: [],
     chatError: { code: "100002", desc: "登录已失效，请重新登录" },
     reset() {
       state.smsSent = null
@@ -54,6 +58,8 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
       state.dailyBalance = 5000
       state.lastChatHeaders = null
       state.chatMode = "stream"
+      state.modelsNoCode = false
+      state.extraSessions = []
     },
   }
   const AK = process.env.LOOMY_XFYUN_ACCESS_KEY_ID || "2thryby66wxi53sk"
@@ -109,15 +115,16 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
       const url = new URL(req.url)
       const token = req.headers.get("token") ?? ""
       const bearer = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "")
-      if (token !== state.session || bearer !== state.session) {
+      // 第二个账号（测试缓存分桶用）：额外会话同样有效
+      const known = token === state.session || state.extraSessions.includes(token)
+      if (!known || bearer !== token) {
         // 真实上游的表现：HTTP 200 + code 100002
         return json(200, { code: "100002", desc: "登录已失效，请重新登录", data: {} })
       }
       if (url.pathname === "/api/v1/models") {
         state.modelsReads++
         return json(200, {
-          code: OK,
-          desc: "ok",
+          ...(state.modelsNoCode ? {} : { code: OK, desc: "ok" }),
           data: [
             { id: "spark-x", name: "Spark X2.5 (x0.1)", capabilities: { reasoning: true, function_calling: true, vision: false }, context_window: 128000, max_tokens: 8192 },
             { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash 0731 (x3.0)", capabilities: { reasoning: true, function_calling: false, vision: true } },
@@ -133,6 +140,15 @@ export function fakeLoomy({ phone = "13800138000" } = {}) {
         const body = await req.json().catch(() => ({}))
         state.chatCalls.push({ body })
         if (state.chatMode === "401") return json(401, { code: "100002", desc: "登录已失效，请重新登录" })
+        if (state.chatMode === "empty-json") {
+          return new Response("", { headers: { "content-type": "application/json" } })
+        }
+        if (state.chatMode === "empty-sse") {
+          // 200 + event-stream，一个字节都没有（上游把错误吞成空流的形态）
+          return new Response(new ReadableStream({ start(c) { c.close() } }), {
+            headers: { "content-type": "text/event-stream" },
+          })
+        }
         if (state.chatMode === "json-error") return json(200, { code: state.chatError.code, desc: state.chatError.desc, data: {} })
         if (state.chatMode === "sse-error") {
           return new Response(`data: ${JSON.stringify({ code: state.chatError.code, desc: state.chatError.desc })}\n\n`, {

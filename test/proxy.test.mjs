@@ -267,3 +267,27 @@ test("a first-frame error cancels the upstream body instead of abandoning it", a
   await new Promise((r) => setTimeout(r, 0))
   expect(cancelled).toBe(true)
 })
+
+// 200 但一个字节都没有，不是「空回复」，是一次没有说明的失败。原样交回会让
+// 调用方看到「流结束却没有 finish_reason」——最难查的那种形态。
+test("an empty 200 body is a 502, not an empty answer", async () => {
+  const emptySse = () => new Response(new ReadableStream({ start(c) { c.close() } }), {
+    headers: { "content-type": "text/event-stream" },
+  })
+  const f1 = makeFetch(base({ call: async () => emptySse() }))
+  const r1 = await f1("https://gateway/v1/chat/completions", { body: '{"model":"m","stream":true,"messages":[]}' })
+  expect(r1.status).toBe(502)
+  expect((await r1.json()).error.message).toContain("空响应")
+
+  // stream:false 的重组路径也不能凭空造一个空 completion
+  const f2 = makeFetch(base({ call: async () => emptySse() }))
+  const r2 = await f2("https://gateway/v1/chat/completions", { body: '{"model":"m","stream":false,"messages":[]}' })
+  expect(r2.status).toBe(502)
+
+  // JSON 平面同理
+  const f3 = makeFetch(base({
+    call: async () => new Response("", { headers: { "content-type": "application/json" } }),
+  }))
+  const r3 = await f3("https://gateway/v1/chat/completions", { body: '{"model":"m","stream":false,"messages":[]}' })
+  expect(r3.status).toBe(502)
+})

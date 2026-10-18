@@ -19,7 +19,14 @@ Loomy 部分的**从头重写**（只要讯飞这一块），并且把之前做
 
 ## 安装
 
-文件夹插件，没有发布到 npm：
+没有发布到 npm；magpie 可以直接从 GitHub 装：
+
+```sh
+magpie plugin add github:xiyingruyi/magpie-loomy-auth
+magpie plugin login loomy
+```
+
+也可以先 clone 下来再装这个文件夹（想先读代码的话）：
 
 ```sh
 git clone https://github.com/xiyingruyi/magpie-loomy-auth.git
@@ -28,6 +35,18 @@ magpie plugin login loomy
 ```
 
 装完后记得在 provider 卡片上打开「自动签到」—— 第三方插件默认是关的。
+
+### 更新 / 停用 / 卸载
+
+```sh
+magpie plugin update            # 把每个 github: 插件拉到最新
+magpie plugin on|off <name>     # 临时关掉，不删除
+magpie plugin rm <name>         # 删掉
+magpie plugin logout loomy      # 忘掉已保存的登录态
+```
+
+`<name>` 取 `magpie plugin list` 里显示的那个。用路径装的插件是**实时读那个
+文件夹**的，所以更新就是在文件夹里 `git pull`。
 
 ## 登录
 
@@ -69,10 +88,11 @@ Loomy 对**本该是错误**的情况回 **HTTP 200 + 业务码**，登录失效
 | 上游 | HTTP | magpie 的处置 |
 |---|---|---|
 | `100002` / `020002`（登录失效 / 缺 token） | 401 + `X-Magpie-Sign-In: expired` | 标记账号、提示重新登录 |
-| `40201` / 额度用完措辞 | 402 `insufficient_quota` | 停下，不重试 |
+| `40201` / `40200` / 额度用完措辞 | 402 `insufficient_quota` | 停下，不重试 |
 | `40300` / `40301`（模型不提供） | 403 | 模型维度的拒绝 |
-| `42900` / 限流措辞 | 429 | 等待后重试 |
-| 其它 | 400 | 请求本身有问题 |
+| `42900` / `42901` / 限流措辞 | 429 | 等待后重试 |
+| `40100` / `51102` | 401 + `X-Magpie-Sign-In: expired` | 标记账号 |
+| 其它没见过的码 | 400 | 请求本身有问题 |
 
 所有失败都以 `Response` 返回，绝不抛异常 —— 插件的 fetch 抛错只会让 magpie
 记一条没有上下文的失败。
@@ -89,7 +109,9 @@ Loomy 对**本该是错误**的情况回 **HTTP 200 + 业务码**，登录失效
 `limit.output` 当作**硬上限**下发到每个请求，自己编一个「保守」的默认值，就等于
 造出一个真实的天花板（之前 384,000 token 的回复被夹到 32,000，就是这么来的）。
 
-登录之前用一份 3 个模型的兜底表，让 provider 在登录前就可见。
+登录之前用一份 3 个模型的兜底表，让 provider 在登录前就可见。清单按账号缓存
+几分钟：magpie 在**每个**转发的请求前都会问一次插件的模型清单，每次都去问上游
+等于给每一句对话都加一次往返。
 
 ## 积分与用量
 
@@ -136,8 +158,7 @@ Loomy 还有 8 个一次性任务（合计 10000 积分）。它们是**福利�
 
 ## 设计要点
 
-四个在早前的同类插件里真实发生过的故障，在这里都被设计掉，并且各有一条回归
-测试：
+五个真实发生过的故障，在这里都被设计掉，并且各有一条回归测试：
 
 1. **自己编的输出上限**会悄悄夹住每个回复 —— `limit.output` 是硬上限，不是
    元数据。不声明即 `0`，即「去问 models.dev」。
@@ -146,11 +167,17 @@ Loomy 还有 8 个一次性任务（合计 10000 积分）。它们是**福利�
 3. **拿死 token 去签到**看起来完全像「今天还没签」。首登接口按天幂等，不会
    重复领取，但插件仍报 `ineligible`，让账号被标记而不是被无限重试。
 4. **会抛错的签到钩子**会丢掉 message。所有路径都返回 outcome。
+5. **登录方法直接 return 结果、而不是交回 callback。** magpie 对每个 oauth
+   流程都会调一次 `callback`，而 `authorize` 的返回值里只留下
+   `{url, instructions, method}`；直接作答的方法会死在
+   `s.a.callback is not a function`，连失败原因都看不见。这里**每一条**路径
+   （包括每一条失败路径）都交回带 callback 的流程，有一条测试把六种输入全走
+   一遍。
 
 ## 开发
 
 ```sh
-bun test                    # 76 个测试，全部打在本地 fake 上游
+bun test                    # 83 个测试，全部打在本地 fake 上游
 bun scripts/live-check.mjs  # 对真实服务的只读检查
 LOOMY_SESSION=… bun scripts/live-check.mjs   # 再加模型、积分与一次真实对话
 ```

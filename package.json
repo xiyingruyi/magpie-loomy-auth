@@ -1,6 +1,6 @@
 {
   "name": "magpie-loomy-auth",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "magpie provider plugin for Loomy (讯飞 · loomyad.xunfei.cn): SMS sign-in, models, chat, points and magpie's native daily check-in (每日首登赠送积分 / 新手任务)",
   "type": "module",
   "main": "./index.mjs",
@@ -23,6 +23,14 @@
     "sign-in"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiyingruyi/magpie-loomy-auth.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiyingruyi/magpie-loomy-auth/issues"
+  },
+  "homepage": "https://github.com/xiyingruyi/magpie-loomy-auth#readme",
   "scripts": {
     "test": "bun test"
   },

@@ -22,7 +22,14 @@ the iFlytek piece — with the failure modes found while shipping
 
 ## Install
 
-A folder plugin, not published to npm:
+Not published to npm; magpie installs it straight from GitHub:
+
+```sh
+magpie plugin add github:xiyingruyi/magpie-loomy-auth
+magpie plugin login loomy
+```
+
+Or clone it and add the folder, if you would rather read the code first:
 
 ```sh
 git clone https://github.com/xiyingruyi/magpie-loomy-auth.git
@@ -32,6 +39,18 @@ magpie plugin login loomy
 
 Then turn on **Auto check-in** on the provider card — third-party plugins
 default to off.
+
+### Updating, disabling, removing
+
+```sh
+magpie plugin update            # pulls the newest version of every github: plugin
+magpie plugin on|off <name>     # turn it off without removing it
+magpie plugin rm <name>         # remove it
+magpie plugin logout loomy      # forget the stored session
+```
+
+`<name>` is what `magpie plugin list` shows. A plugin added by path is read live
+from that folder, so a `git pull` inside it is the update.
 
 ## Signing in
 
@@ -78,10 +97,11 @@ means:
 | upstream | HTTP | effect in magpie |
 |---|---|---|
 | `100002` / `020002` (session gone, missing token) | 401 + `X-Magpie-Sign-In: expired` | the account is marked, a re-sign-in is offered |
-| `40201` / quota wording | 402 `insufficient_quota` | stops instead of retrying |
+| `40201` / `40200` / quota wording | 402 `insufficient_quota` | stops instead of retrying |
 | `40300` / `40301` (model not served) | 403 | model-level refusal |
-| `42900` / rate-limit wording | 429 | backs off |
-| anything else | 400 | a bad request |
+| `42900` / `42901` / rate-limit wording | 429 | backs off |
+| `40100` / `51102` | 401 + `X-Magpie-Sign-In: expired` | the account is marked |
+| any other unrecognised code | 400 | a bad request |
 
 Every failure is a `Response`, never a thrown error: a throw from a plugin's
 fetch leaves magpie with a failure that has no context.
@@ -100,7 +120,10 @@ fills from models.dev. That matters because magpie enforces a model's
 becomes a real ceiling (this is exactly how 384,000-token replies were once
 clamped to 32,000).
 
-Before signing in, a three-model fallback keeps the provider visible.
+Before signing in, a three-model fallback keeps the provider visible. The
+catalogue is cached per account for a few minutes: magpie asks the plugin for
+its model list before **every** request it proxies, so answering from the
+vendor each time would add an upstream round trip to every chat.
 
 ## Points and usage
 
@@ -151,8 +174,7 @@ not settle the account: it is retried on the next check-in.
 
 ## Design notes
 
-Four failure modes from an earlier magpie provider plugin are designed out
-here, each with a regression test:
+Five failure modes are designed out here, each with a regression test:
 
 1. **A made-up output limit** silently caps every reply — `limit.output` is a
    hard cap, not metadata. Omitted means `0`, which means "ask models.dev".
@@ -164,11 +186,23 @@ here, each with a regression test:
    retried forever.
 4. **A check-in hook that throws** loses its message. Every path returns an
    outcome.
+5. **A sign-in that returns its result instead of a callback.** Magpie always
+   calls a flow's `callback` and keeps only `{url, instructions, method}` from
+   `authorize`, so a method that answers directly dies on
+   `s.a.callback is not a function` and hides the reason it failed. Every path
+   here — including every failure path — hands back a flow with a callback.
+   A test walks all six of them.
+
+Plus two defects an adversarial review pass found in the streaming path, both
+with regression tests of their own: a multi-byte character split just after
+the first SSE record used to lose its trailing bytes (`peekFirst` now slices
+bytes, not a decoded string), and a first-frame error abandoned the upstream
+body instead of cancelling it.
 
 ## Development
 
 ```sh
-bun test                    # 76 tests, all against a local fake upstream
+bun test                    # 83 tests, all against a local fake upstream
 bun scripts/live-check.mjs  # read-only checks against the real service
 LOOMY_SESSION=… bun scripts/live-check.mjs   # + models, usage, one chat
 ```

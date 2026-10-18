@@ -24,6 +24,55 @@ const profileOf = (auth) => (model) => profiles.get(profileKey(auth, model))
 
 const accountLabel = (auth) => auth?.accountId || auth?.name || ""
 
+// 登录失败也要包成一个「完整流程」：magpie 的 authorize 会丢掉 type/error，
+// 只留 {url, instructions, method}，然后照样去调 callback。直接 return
+// {type:"failed"} 的结果是一个没有 callback 的流程，报出来的是
+// `s.a.callback is not a function`，真正的原因反而看不见。
+const failedFlow = (error) => ({
+  url: "",
+  instructions: "",
+  // 不是 "code"：magpie 不会去读验证码，直接调一次 callback 拿结果
+  method: "auto",
+  callback: async () => ({ type: "failed", error: String(error) }),
+})
+
+// 粘贴 session 时的那次校验单独给一个更长的预算：上游对**无效**会话不会立刻
+// 回绝，实测同一个接口正常 1s、忙的时候十几秒。用默认的 20s 会把「上游慢」
+// 说成「你的 session 有问题」，那是两个完全不同的结论。
+const PASTE_CHECK_TIMEOUT = 45_000
+const isTimeout = (e) =>
+  e?.name === "TimeoutError" || e?.name === "AbortError" || /timed out|timeout|超时/i.test(String(e?.message ?? ""))
+
+// 模型目录的短缓存。
+//
+// magpie 在**每个**经它转发的请求前都会走一次 info() → provider.models
+// （fetchAs 就是这么调的），钩子里直接问上游等于「每聊一句先问一次模型清单」：
+// 多一次往返、多一份上游额度消耗，也多一个失败点。上游清单变化很慢，magpie
+// 自己也是每小时才重新列一次，缓存几分钟看不出差别。
+//
+// 按 session 分桶：不同账号能用的模型可能不同，共用一份缓存会串号。
+const CATALOG_TTL = 5 * 60 * 1000
+const catalogs = new Map() // session → { base, at, models }
+
+async function liveCatalog(session, { now = Date.now(), call } = {}) {
+  const base = MODEL_BASE()
+  const hit = catalogs.get(session)
+  if (hit && hit.base === base && now - hit.at < CATALOG_TTL) return hit.models
+  const payload = await gatewayJson("GET", "/api/v1/models", session, {
+    // 清单接口成功时不一定带业务码，见 lib/http.mjs
+    allowMissingCode: true,
+    ...(call ? { call } : {}),
+  })
+  const entries = Array.isArray(payload?.data) ? payload.data : []
+  if (!entries.length) return null
+  const models = modelsFromCatalog(entries, ID)
+  if (!Object.keys(models).length) return null
+  // 只缓存读成功的结果；失败留空，下一次重新问
+  if (catalogs.size > 8) catalogs.clear()
+  catalogs.set(session, { base, at: now, models })
+  return models
+}
+
 // 一次性的新手任务开关：magpie 的 provider 级开关（auth.options），默认关。
 const onboardingOn = ({ magpie } = {}) => {
   try {
@@ -79,13 +128,23 @@ export async function LoomyAuthPlugin({ client, magpie } = {}) {
           ],
           async authorize(inputs) {
             const phone = normalizePhone(inputs?.phone)
-            if (!phone) return { type: "failed", error: "请填写 11 位中国大陆手机号" }
+            // 走到这里说明校验没拦住（CLI 不跑 prompts[].validate）。**不能**在这里
+            // 直接 return {type:"failed"}：magpie 的 authorize 只取
+            // {url, instructions, method} 三个字段，type/error 会被丢掉，然后它
+            // 照旧去调 callback —— 于是变成一个「没有 callback」的流程，报的是
+            // `s.a.callback is not a function`，用户永远看不到原因。失败也要包成
+            // 一个带 callback 的流程，让原因从 callback 里出来。
+            if (!phone) return failedFlow("请填写 11 位中国大陆手机号")
             // 现在就把验证码发出去；用户接下来输入的 6 位码完成这次登录
             let msgid
             try {
               ;({ msgid } = await sendCode(phone))
             } catch (e) {
-              return { type: "failed", error: String(e?.message ?? e) }
+              return failedFlow(
+                isTimeout(e)
+                  ? "发验证码超时：Loomy 这次响应太慢，请再试一次"
+                  : String(e?.message ?? e),
+              )
             }
             return {
               // url 留空：不需要打开任何页面，magpie 直接进入输入验证码这一步
@@ -127,28 +186,46 @@ export async function LoomyAuthPlugin({ client, magpie } = {}) {
               validate: (v) => (String(v ?? "").trim() ? undefined : "必填"),
             },
           ],
+          // 不打开任何页面：method 不是 "code"，magpie 直接调一次 callback 收尾
+          // （CLI 是 plugin.Finish，窗口是它的 SignIn 驱动），所以结果必须从
+          // callback 里 return —— 从 authorize 直接 return 一个 success 会被丢掉，
+          // 然后它去调不存在的 callback。
           async authorize(inputs) {
             const session = String(inputs?.session ?? "").trim()
-            if (!session) return { type: "failed", error: "session 必填" }
-            // 先验证一次：粘错一个字符的话，magpie 会得到一次「看起来登录成功、
-            // 实际每次请求 401」的账号。这里花一次 GET /models 确认可用。
-            try {
-              await gatewayJson("GET", "/api/v1/models", session)
-              return {
-                type: "success",
-                refresh: "",
-                access: session,
-                // 粘贴的 session 不知道签发时间，无法推算到期点（14 天）。给 0：
-                // magpie 因此不会尝试续期，账号一直可用到上游拒绝为止。
-                expires: 0,
-                accountId: "手动粘贴",
-                source: "manual",
-              }
-            } catch (e) {
-              if (e instanceof SignedOut || e?.signIn === "expired") {
-                return { type: "failed", error: "这个 session 已失效，或者复制得不完整" }
-              }
-              return { type: "failed", error: `session 校验失败：${e?.message ?? e}` }
+            return {
+              url: "",
+              instructions: "正在校验这个 session……",
+              method: "auto",
+              callback: async () => {
+                if (!session) return { type: "failed", error: "session 必填" }
+                // 先验证一次：粘错一个字符的话，magpie 会得到一次「看起来登录成功、
+                // 实际每次请求 401」的账号。这里花一次 GET /models 确认可用。
+                try {
+                  await gatewayJson("GET", "/api/v1/models", session, {
+                    allowMissingCode: true,
+                    timeout: PASTE_CHECK_TIMEOUT,
+                  })
+                  return {
+                    type: "success",
+                    refresh: "",
+                    access: session,
+                    // 粘贴的 session 不知道签发时间，无法推算到期点（14 天）。给 0：
+                    // magpie 因此不会尝试续期，账号一直可用到上游拒绝为止。
+                    expires: 0,
+                    accountId: "手动粘贴",
+                    source: "manual",
+                  }
+                } catch (e) {
+                  if (e instanceof SignedOut || e?.signIn === "expired") {
+                    return { type: "failed", error: "这个 session 已失效，或者复制得不完整" }
+                  }
+                  // 超时不等于失效：别让用户因为上游慢就以为 session 坏了
+                  if (isTimeout(e)) {
+                    return { type: "failed", error: "校验超时：Loomy 这次响应太慢，session 本身可能没问题，再试一次" }
+                  }
+                  return { type: "failed", error: `session 校验失败：${e?.message ?? e}` }
+                }
+              },
             }
           },
         },
@@ -203,12 +280,10 @@ export async function LoomyAuthPlugin({ client, magpie } = {}) {
         const session = String(sessionOf(auth) ?? "").trim()
         if (!session) return provider.models
         try {
-          const payload = await gatewayJson("GET", "/api/v1/models", session)
-          const entries = Array.isArray(payload?.data) ? payload.data : []
-          if (!entries.length) return provider.models
-          const live = modelsFromCatalog(entries, ID)
-          if (!Object.keys(live).length) return provider.models
-          // 记下能力表（请求管线按 model 查），保留用户已有的覆盖
+          const live = await liveCatalog(session)
+          if (!live) return provider.models
+          // 能力表按账号记（请求管线按 `${accountId}:${model}` 查），缓存命中时
+          // 也要写：这份表是「谁在问」的事，不是「上游说了什么」的事
           for (const [id, m] of Object.entries(live)) {
             profiles.set(profileKey(auth, id), {
               reasoning: m.capabilities.reasoning,
@@ -242,4 +317,7 @@ export const _internal = {
   makeFetch,
   makeCheckin,
   usageOf,
+  liveCatalog,
+  failedFlow,
+  catalogs,
 }

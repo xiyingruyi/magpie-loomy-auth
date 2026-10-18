@@ -77,6 +77,27 @@ const plugin = await LoomyAuthPlugin({ client: { auth: { set: async () => {} } }
   check(code === "210106", "账号域 HMAC 签名被上游接受（未发短信）", code)
 }
 
+// 3.6 登录流程形态：magpie 对 oauth 方法**无条件**调用 callback（CLI 是
+// plugin.Finish，窗口是它的 SignIn 驱动），authorize 的 {type,error} 会被丢掉。
+// 所以每条路都必须交回一个带 callback 的流程。这里拿一个坏 session 真的走一遍
+// 粘贴流程：拿到「失效」说明形态和判定都对；若打印出
+// `s.a.callback is not a function`，就是形态退回旧写法了。
+{
+  const paste = plugin.auth.methods.find((m) => m.label.includes("Paste"))
+  let verdict = ""
+  try {
+    const flow = await paste.authorize({ session: "live-check-not-a-session" })
+    if (typeof flow.callback !== "function") verdict = "authorize 没有交回 callback"
+    else {
+      const r = await flow.callback()
+      verdict = r?.type === "failed" ? String(r.error ?? "") : `意外成功：${JSON.stringify(r)}`
+    }
+  } catch (e) {
+    verdict = `抛错：${e?.message ?? e}`
+  }
+  check(/失效|校验超时|复制得不完整/.test(verdict), "登录流程走 callback，坏 session 被如实拒绝", verdict)
+}
+
 // 4. 非 JSON 请求体：400，且不发上游
 if (saved.access) {
   const loader = await plugin.auth.loader(getAuth)
