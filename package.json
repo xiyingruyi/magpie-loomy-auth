@@ -1,6 +1,6 @@
 {
   "name": "magpie-loomy-auth",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "magpie provider plugin for Loomy (讯飞 · loomyad.xunfei.cn): SMS sign-in, models, chat, points and magpie's native daily check-in (每日首登赠送积分 / 新手任务)",
   "type": "module",
   "main": "./index.mjs",
