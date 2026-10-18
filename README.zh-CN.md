@@ -180,7 +180,8 @@ fake 上游（`test/fake.mjs`）会**重新计算账号域的 HMAC 签名**再�
 请求形态（HMAC 信封、端点、请求体适配）移植自
 [aimod-cc/agent2api](https://github.com/aimod-cc/agent2api)（MIT）与
 [`lin2670/magpie-plugins`](https://github.com/lin2670/magpie-plugins)（MIT）。
+两处上游的版权声明都抄录在 [NOTICE](NOTICE) 里。
 
 ## 许可
 
-MIT
+MIT —— 见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。

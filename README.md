@@ -202,7 +202,8 @@ implementation):
 The request shapes (HMAC envelope, endpoints, body adaptations) are ported
 from [aimod-cc/agent2api](https://github.com/aimod-cc/agent2api) (MIT) and
 [`lin2670/magpie-plugins`](https://github.com/lin2670/magpie-plugins) (MIT).
+Both upstream copyright notices are reproduced in [NOTICE](NOTICE).
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) and [NOTICE](NOTICE).

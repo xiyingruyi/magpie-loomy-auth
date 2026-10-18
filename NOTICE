@@ -1,0 +1,35 @@
+magpie-loomy-auth
+Copyright (c) 2026 magpie-loomy-auth contributors
+
+This product includes material derived from the following MIT-licensed
+projects. Their copyright notices are reproduced here so that the condition
+in the MIT License ("the above copyright notice and this permission notice
+shall be included in all copies or substantial portions of the Software") is
+met for the derived portions.
+
+---------------------------------------------------------------------------
+lin2670/magpie-plugins  (packages/loomy-auth)
+https://github.com/lin2670/magpie-plugins
+
+Copyright (c) 2026 lin2670
+
+Licensed under the MIT License.
+
+The following parts of this repository are derived from it:
+  - the HMAC envelope and signature helpers (lib/sign.mjs)
+  - the request/body adaptations (lib/thinking.mjs) and the SSE utilities
+    (lib/sse.mjs)
+  - the one-time onboarding task registry (lib/onboarding.mjs)
+  - the local fake upstream used by the tests (test/fake.mjs)
+
+---------------------------------------------------------------------------
+aimod-cc/agent2api
+https://github.com/aimod-cc/agent2api
+
+Copyright (c) 2026 aimod-cc (https://github.com/aimod-cc)
+
+Licensed under the MIT License.
+
+The Loomy request shapes (the signed account-domain envelope, the endpoint
+paths, and the body adaptations) originate in this project, which
+lin2670/magpie-plugins ports in turn.
