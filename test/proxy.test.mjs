@@ -311,3 +311,64 @@ test("an empty 200 body is a 502, not an empty answer", async () => {
   const r3 = await f3("https://gateway/v1/chat/completions", { body: '{"model":"m","stream":false,"messages":[]}' })
   expect(r3.status).toBe(502)
 })
+
+// ---- 模型 id 校验：上游对不认识的 id 不报错，而是静默回落成 Spark ----
+
+const sseWith = (model) => sse([
+  `data: {"id":"c","model":"${model}","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n`,
+  "data: [DONE]\n\n",
+])
+
+test("an unknown model is refused with the live id list", async () => {
+  const f = makeFetch(base({
+    resolveModel: async () => ({ id: "", available: ["GLM-5.3-Flash", "spark-x2.6"] }),
+  }))
+  const r = await f("https://x/v1/chat/completions", {
+    method: "POST",
+    body: JSON.stringify({ model: "glm-5.3-flash", messages: [] }),
+  })
+  expect(r.status).toBe(400)
+  expect((await r.json()).error.message).toContain("GLM-5.3-Flash")
+})
+
+test("a case-only alias is rewritten to the live id before it goes upstream", async () => {
+  let sent = null
+  const f = makeFetch(base({
+    resolveModel: async (_auth, model) => ({ id: model === "glm-5.3-flash" ? "GLM-5.3-Flash" : model }),
+    call: async (_url, init) => {
+      sent = JSON.parse(init.body)
+      return sseWith("GLM-5.3-Flash")
+    },
+  }))
+  const r = await f("https://x/v1/chat/completions", {
+    method: "POST",
+    body: JSON.stringify({ model: "glm-5.3-flash", messages: [{ role: "user", content: "hi" }], stream: true }),
+  })
+  expect(r.status).toBe(200)
+  expect(sent.model).toBe("GLM-5.3-Flash")
+})
+
+test("a silent model fallback on the stream is aborted, not passed off as success", async () => {
+  const f = makeFetch(base({
+    resolveModel: async (_auth, model) => ({ id: model }),
+    call: async () => sseWith("spark-x2.6"),
+  }))
+  const r = await f("https://x/v1/chat/completions", {
+    method: "POST",
+    body: JSON.stringify({ model: "GLM-5.3-Flash", messages: [{ role: "user", content: "hi" }], stream: true }),
+  })
+  expect(r.status).toBe(502)
+  expect((await r.json()).error.message).toContain("spark-x2.6")
+})
+
+test("a silent model fallback in a non-stream answer is aborted too", async () => {
+  const f = makeFetch(base({
+    resolveModel: async (_auth, model) => ({ id: model }),
+    call: async () => sseWith("spark-x2.6"),
+  }))
+  const r = await f("https://x/v1/chat/completions", {
+    method: "POST",
+    body: JSON.stringify({ model: "GLM-5.3-Flash", messages: [{ role: "user", content: "hi" }], stream: false }),
+  })
+  expect(r.status).toBe(502)
+})
