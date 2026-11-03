@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test"
-import { LoomyAuthPlugin, _internal } from "../index.mjs"
+import { LoomyAuthPlugin, _internal, withoutShadowFallbacks } from "../index.mjs"
 import { fakeLoomy } from "./fake.mjs"
 
 // 全部打到本地 fake 上游：账号域会重新校验 HMAC 签名，网关会检查双凭据头
@@ -587,4 +587,24 @@ test("a single upstream request never outlasts magpie's 20-second hook window", 
   expect(REQUEST_TIMEOUT).toBeLessThan(20_000)
   // 留足余量：至少 4 秒给宿主的调度、序列化和回写
   expect(20_000 - REQUEST_TIMEOUT).toBeGreaterThanOrEqual(4_000)
+})
+
+describe("shadow fallback ids", () => {
+  test("a fallback id missing from the live catalogue is dropped, user models stay", () => {
+    const base = {
+      "glm-5.3-flash": { name: "GLM 5.3 Flash" },
+      "deepseek-v4-flash": { name: "DeepSeek V4 Flash" },
+      "my-own-model": { name: "Mine" },
+    }
+    const live = { "GLM-5.3-Flash": { name: "GLM-5.3-Flash" } }
+    const out = withoutShadowFallbacks(base, live)
+    expect(out["glm-5.3-flash"]).toBeUndefined()
+    expect(out["deepseek-v4-flash"]).toBeUndefined()
+    expect(out["my-own-model"]).toBeDefined()
+  })
+
+  test("a fallback id that the live catalogue does carry is kept", () => {
+    const base = { "spark-x": { name: "Spark X2.5" } }
+    expect(withoutShadowFallbacks(base, { "spark-x": {} })["spark-x"]).toBeDefined()
+  })
 })

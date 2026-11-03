@@ -19,6 +19,17 @@ const profiles = new Map()
 // 账号 → session。Loomy 的 session 只有一种来源（短信登录 / 手动粘贴），
 // 存在 access 里；refresh 恒为空 —— 上游没有续期接口。
 const sessionOf = (auth) => (auth?.type === "oauth" ? auth.access : auth?.key) ?? ""
+
+// 离线兜底里的影子 id（glm-5.3-flash / deepseek-v4-flash / spark-x）上游并不认，
+// 选中会静默回落到 Spark。实时目录里没有它们时就从列表里删掉；用户自己加的
+// 其它模型不受影响。
+export function withoutShadowFallbacks(base, live) {
+  const out = { ...(base ?? {}) }
+  for (const id of Object.keys(FALLBACK_MODELS)) {
+    if (!live?.[id]) delete out[id]
+  }
+  return out
+}
 const profileKey = (auth, model) => `${auth?.accountId ?? auth?.userId ?? ""}:${model}`
 const profileOf = (auth) => (model) => profiles.get(profileKey(auth, model))
 
@@ -98,6 +109,26 @@ export async function LoomyAuthPlugin({ client, magpie } = {}) {
   }
 
   const checkin = makeCheckin({ sessionOf, settledOf, settle, rememberQuota, onboardingOn: () => onboardingOn({ magpie }) })
+
+  // 请求里的 model 先对实时目录：大小写不敏感地归一到真实 id；完全对不上就
+  // 交回空 id，由 proxy 回 400。目录拉不到时返回原值（不拦请求）。
+  async function resolveModelId(auth, requested) {
+    const wanted = String(requested ?? "").trim()
+    const session = String((await sessionOf(auth)) ?? "").trim()
+    if (!wanted || !session) return { id: wanted }
+    let live = null
+    try {
+      live = await liveCatalog(session)
+    } catch {
+      live = null
+    }
+    if (!live) return { id: wanted }
+    if (live[wanted]) return { id: wanted }
+    const lower = wanted.toLowerCase()
+    const hit = Object.keys(live).find((id) => id.toLowerCase() === lower)
+    if (hit) return { id: hit, alias: true }
+    return { id: "", available: Object.keys(live) }
+  }
 
   return {
     config(config) {
@@ -266,7 +297,7 @@ export async function LoomyAuthPlugin({ client, magpie } = {}) {
           // 上游不认这个 key（fetch 自己会带上 token 头），但 magpie 要求非空
           apiKey: session,
           // fetch 每次请求现取 auth，能力表也按那次请求的账号查
-          fetch: makeFetch({ getAuth, sessionOf, profileOf, call: fetch }),
+          fetch: makeFetch({ getAuth, sessionOf, profileOf, call: fetch, resolveModel: resolveModelId }),
         }
       },
 
@@ -298,8 +329,10 @@ export async function LoomyAuthPlugin({ client, magpie } = {}) {
               tagImages: /deepseek/i.test(id),
             })
           }
-          // 实时清单覆盖同名条目；用户自己加过的其它模型保留
-          return { ...(provider.models ?? {}), ...live }
+          // 实时清单覆盖同名条目；用户自己加过的其它模型保留。
+          // 但离线兜底里的影子 id（glm-5.3-flash / deepseek-v4-flash / spark-x）
+          // 上游并不认，选中会静默回落到 Spark —— 实时清单里没有就直接丢掉。
+          return { ...withoutShadowFallbacks(provider.models, live), ...live }
         } catch (e) {
           // 登录失效要让账号被标记；其余故障保留原清单
           if (e?.signIn === "expired") throw e
